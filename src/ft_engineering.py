@@ -170,22 +170,14 @@ def define_feature_groups(df: pd.DataFrame) -> dict:
         "salario_cliente",
         "total_otros_prestamos",
         "cuota_pactada",
-        "puntaje",
-        "puntaje_datacredito",
         "cant_creditosvigentes",
         "huella_consulta",
-        "saldo_mora",
-        "saldo_total",
-        "saldo_principal",
-        "saldo_mora_codeudor",
         "creditos_sectorFinanciero",
         "creditos_sectorCooperativo",
         "creditos_sectorReal",
         "promedio_ingresos_datacredito",
         "ratio_cuota_salario",
         "ratio_capital_salario",
-        "ratio_mora_saldo_total",
-        "flag_tiene_mora",
         "total_creditos_sectoriales",
         "anio_prestamo",
         "mes_prestamo"
@@ -207,6 +199,23 @@ def define_feature_groups(df: pd.DataFrame) -> dict:
     }
 
     return feature_groups
+
+ # Variables excluidas por posible fuga de información o relación demasiado directa
+    # con la variable objetivo:
+    #
+    # - saldo_mora
+    # - saldo_total
+    # - saldo_principal
+    # - saldo_mora_codeudor
+    # - ratio_mora_saldo_total
+    # - flag_tiene_mora
+    # - puntaje
+    # - puntaje_datacredito
+
+# ---------------------------------------- OBSERVACION A TENER EN CUENTA --------------------------------------------------
+#   Las variables puntaje y puntaje_datacredito se excluyen del primer entrenamiento porque generaban métricas perfectas, lo que sugiere posible fuga de información
+# o una relación demasiado directa con la variable objetivo.
+# -------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 # ================================================
 # FUNCIÓN DE CREACIÓN DEL PREPROCESADOR
@@ -314,27 +323,38 @@ def prepare_datasets(df: pd.DataFrame):
     df_limpio = clean_data(df)
 
     # Se crean variables derivadas a partir de las columnas originales.
-    # Estas nuevas variables buscan representar capacidad de pago, nivel de mora, exposición crediticia e información temporal.
- 
+    # Estas nuevas variables buscan representar capacidad de pago, exposición crediticia e información temporal.
+
     df_limpio = create_features(df_limpio)
-
-    # Se separa la variable objetivo del resto de columnas.
-    # X contiene las variables explicativas. y contiene la variable que queremos predecir.
-
-    X = df_limpio.drop(columns=[TARGET])
-    y = df_limpio[TARGET]
 
     # Se definen los grupos de variables que serán tratados por el preprocesador.
     # Esto separa numéricas, categóricas nominales y categóricas ordinales.
-    
+
     feature_groups = define_feature_groups(df_limpio)
 
+    # Se consolidan las columnas seleccionadas para modelado.
+    # Esto evita que variables no deseadas o potencialmente problemáticas queden dentro del conjunto de variables predictoras.
+
+    selected_features = (
+        feature_groups["numeric_features"] +
+        feature_groups["nominal_features"] +
+        feature_groups["ordinal_features"]
+    )
+
+    # Se separa la variable objetivo del conjunto de variables predictoras.
+    # X contiene únicamente las columnas seleccionadas para entrenamiento.
+    # y contiene la variable que queremos predecir.
+
+    X = df_limpio[selected_features]
+    y = df_limpio[TARGET]
+
     # Se construye el preprocesador que luego será usado dentro del pipeline del modelo.
-    
+
     preprocessor = build_preprocessor(feature_groups)
 
     # Se realiza la separación entre entrenamiento y prueba.
-    # stratify=y mantiene la proporción original de clases de Pago_atiempo en ambos conjuntos, algo importante porque la variable objetivo está desbalanceada.
+    # stratify=y mantiene la proporción original de clases de Pago_atiempo en ambos conjuntos,
+    # algo importante porque la variable objetivo está desbalanceada.
 
     X_train, X_test, y_train, y_test = train_test_split(
         X,
