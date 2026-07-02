@@ -2,356 +2,225 @@
 # IMPORTACIÓN DE LIBRERÍAS
 # ================================================
 
-import pandas as pd
-import joblib
-import streamlit as st
-import plotly.express as px
-
 from pathlib import Path
+from typing import Any, Dict, List
 
-from model_monitoring import (
-    cargar_datos_monitoreo,
-    generar_reporte_monitoreo
-)
+import joblib
+import pandas as pd
+import uvicorn
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
+from ft_engineering import clean_data, create_features
 
 
 # ================================================
 # CONFIGURACIÓN GENERAL
 # ================================================
 
-# Se define la ruta raíz del proyecto.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-# Se define la ruta del modelo entrenado.
 MODEL_PATH = PROJECT_ROOT / "models" / "best_model.pkl"
 
-
 # ================================================
-# CONFIGURACIÓN DE STREAMLIT
+# ESQUEMA DE ENTRADA PARA PREDICCIÓN
 # ================================================
 
-st.set_page_config(
-    page_title="Monitoreo del Modelo",
-    layout="wide"
-)
+class PredictionRequest(BaseModel):
+    """
+    Esquema de entrada para predicciones por lote.
+
+    La API espera recibir una lista de registros.
+    Cada registro debe venir como un diccionario con las variables
+    necesarias para generar una predicción.
+    """
+
+    registros: List[Dict[str, Any]] = Field(
+        ...,
+        description="Lista de registros a predecir"
+    )
 
 # ================================================
 # CARGA DEL MODELO ENTRENADO
 # ================================================
 
-@st.cache_resource
 def cargar_modelo():
     """
     Carga el pipeline entrenado guardado en formato pkl.
 
-    El archivo contiene tanto el preprocesador como el modelo final,
-    permitiendo reutilizarlo directamente en despliegue.
+    El pipeline incluye:
+    - Preprocesamiento.
+    - Modelo entrenado.
     """
 
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"No se encontró el modelo en la ruta: {MODEL_PATH}"
+        )
+
     modelo = joblib.load(MODEL_PATH)
+
     return modelo
 
 
-# ================================================
-# CARGA DEL REPORTE DE MONITOREO
-# ================================================
-
-@st.cache_data
-def cargar_reporte_monitoreo():
-    """
-    Genera el reporte de monitoreo utilizando la base histórica
-    y la base nueva con data drift simulado.
-    """
-
-    X_ref, X_new, feature_groups = cargar_datos_monitoreo()
-
-    reporte_monitoreo = generar_reporte_monitoreo(
-        X_ref=X_ref,
-        X_new=X_new,
-        feature_groups=feature_groups
-    )
-
-    return X_ref, X_new, reporte_monitoreo
-
-# ================================================
-# INTERFAZ PRINCIPAL DE LA APLICACIÓN
-# ================================================
-
-st.title("Monitoreo del Modelo de Riesgo Crediticio")
-
-st.markdown(
-    """
-    Esta aplicación permite monitorear cambios en la distribución de los datos
-    utilizados por el modelo de predicción de pago a tiempo.
-
-    Se compara una **base histórica de referencia**, utilizada durante el entrenamiento,
-    contra una **base nueva con data drift simulado**.
-    """
-)
-
-# Se cargan modelo y datos de monitoreo.
+# Se carga el modelo al iniciar la API.
 modelo = cargar_modelo()
-X_ref, X_new, reporte_monitoreo = cargar_reporte_monitoreo()
-
 
 # ================================================
-# RESUMEN GENERAL
+# PREPARACIÓN DE DATOS PARA PREDICCIÓN
 # ================================================
 
-st.subheader("Resumen general del monitoreo")
-
-cantidad_variables = reporte_monitoreo.shape[0]
-cantidad_alertas = int(reporte_monitoreo["alerta_drift"].sum())
-porcentaje_alertas = round((cantidad_alertas / cantidad_variables) * 100, 2)
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    st.metric("Variables monitoreadas", cantidad_variables)
-
-with col2:
-    st.metric("Variables con drift", cantidad_alertas)
-
-with col3:
-    st.metric("% variables con drift", f"{porcentaje_alertas}%")
-
-st.markdown(
+def preparar_datos_prediccion(df_entrada: pd.DataFrame) -> pd.DataFrame:
     """
-    Las alertas se generan a partir de métricas estadísticas como PSI,
-    KS Test, Jensen-Shannon y Chi-cuadrado.
+    Prepara los datos recibidos por la API antes de enviarlos al modelo.
     """
+
+    df = df_entrada.copy()
+
+    if "Pago_atiempo" in df.columns:
+        df = df.drop(columns=["Pago_atiempo"])
+
+    # Algunas variables no forman parte del modelo final porque fueron excluidas por posible fuga de información, pero create_features() las utiliza para
+    # construir variables derivadas.
+    columnas_auxiliares = {
+        "saldo_total": 0,
+        "saldo_mora": 0
+    }
+
+    for columna, valor_default in columnas_auxiliares.items():
+        if columna not in df.columns:
+            df[columna] = valor_default
+
+    df = clean_data(df)
+
+    df = create_features(df)
+
+    if "Pago_atiempo" in df.columns:
+        df = df.drop(columns=["Pago_atiempo"])
+
+    return df
+
+# ================================================
+# CREACIÓN DE LA APLICACIÓN FASTAPI
+# ================================================
+
+app = FastAPI(
+    title="API de Predicción de Riesgo Crediticio",
+    description="API para disponibilizar el modelo entrenado del proyecto MLOps.",
+    version="1.3.0"
 )
 
-# ================================================
-# INDICADOR VISUAL DE RIESGO
-# ================================================
-
-st.subheader("Indicador general de riesgo por data drift")
-
-if porcentaje_alertas >= 50:
-    st.error(
-        "Riesgo alto: más de la mitad de las variables monitoreadas presentan drift. "
-        "Se recomienda revisar el modelo y considerar un proceso de reentrenamiento."
-    )
-elif porcentaje_alertas >= 20:
-    st.warning(
-        "Riesgo medio: algunas variables presentan drift. "
-        "Se recomienda monitoreo frecuente y revisión de variables críticas."
-    )
-else:
-    st.success(
-        "Riesgo bajo: se detectan pocos cambios relevantes en la población monitoreada."
-    )
 
 # ================================================
-# VISUALIZACIÓN DE MÉTRICAS
+# ENDPOINT RAÍZ
 # ================================================
 
-st.subheader("Visualización de métricas")
-
-# Se crea una tabla resumen para comparar variables con y sin alerta de drift.
-resumen_alertas = reporte_monitoreo["alerta_drift"].value_counts().reset_index()
-resumen_alertas.columns = ["alerta_drift", "cantidad"]
-resumen_alertas["estado"] = resumen_alertas["alerta_drift"].map({
-    True: "Con drift",
-    False: "Sin drift"
-})
-
-fig_alertas = px.bar(
-    resumen_alertas,
-    x="estado",
-    y="cantidad",
-    title="Cantidad de variables con y sin alerta de drift",
-    text="cantidad"
-)
-
-st.plotly_chart(
-    fig_alertas,
-    use_container_width=True,
-    key="grafico_alertas_drift"
-)
-
-# Se grafican los valores de PSI para variables numéricas.
-reporte_numerico = reporte_monitoreo[
-    reporte_monitoreo["tipo_variable"] == "numerica"
-].copy()
-
-if not reporte_numerico.empty:
-    fig_psi = px.bar(
-        reporte_numerico.sort_values("psi", ascending=False),
-        x="variable",
-        y="psi",
-        title="PSI por variable numérica",
-        text="psi"
-    )
-
-    fig_psi.add_hline(
-        y=0.20,
-        line_dash="dash",
-        annotation_text="Umbral PSI significativo"
-    )
-
-    fig_psi.update_layout(
-        xaxis_title="Variable",
-        yaxis_title="PSI",
-        xaxis_tickangle=-45
-    )
-
-    st.plotly_chart(
-        fig_psi,
-        use_container_width=True,
-        key="grafico_psi_variables"
-    )
-
-
-# ================================================
-# VARIABLES CON POSIBLE DATA DRIFT
-# ================================================
-
-st.subheader("Variables con posible data drift")
-
-variables_con_drift = reporte_monitoreo[
-    reporte_monitoreo["alerta_drift"] == True
-]
-
-if not variables_con_drift.empty:
-    st.dataframe(
-        variables_con_drift[[
-            "variable",
-            "tipo_variable",
-            "nivel_drift",
-            "motivo_alerta",
-            "psi",
-            "ks_p_value",
-            "jensen_shannon",
-            "chi2_p_value"
-        ]].round(4),
-        use_container_width=True
-    )
-else:
-    st.success("No se detectaron variables con alerta de drift.")
-
-# ================================================
-# REPORTE COMPLETO DE MONITOREO
-# ================================================
-
-st.subheader("Reporte completo de monitoreo")
-
-st.dataframe(
-    reporte_monitoreo.round(4),
-    use_container_width=True
-)
-
-# ================================================
-# ANÁLISIS TEMPORAL
-# ================================================
-
-st.subheader("Análisis temporal")
-
-if "anio_prestamo" in X_new.columns and "mes_prestamo" in X_new.columns:
-
-    df_temporal = X_new.copy()
-
-    df_temporal["periodo"] = (
-        df_temporal["anio_prestamo"].astype("Int64").astype(str) +
-        "-" +
-        df_temporal["mes_prestamo"].astype("Int64").astype(str).str.zfill(2)
-    )
-
-    evolucion_temporal = (
-        df_temporal
-        .groupby("periodo")
-        .size()
-        .reset_index(name="cantidad_registros")
-        .sort_values("periodo")
-    )
-
-    fig_temporal = px.line(
-        evolucion_temporal,
-        x="periodo",
-        y="cantidad_registros",
-        markers=True,
-        title="Evolución de registros en la base actual"
-    )
-
-    fig_temporal.update_layout(
-        xaxis_title="Periodo",
-        yaxis_title="Cantidad de registros"
-    )
-
-    st.plotly_chart(
-        fig_temporal,
-        use_container_width=True,
-        key="grafico_analisis_temporal"
-    )  
-
-    st.markdown(
-        """
-        Este gráfico permite observar la distribución temporal de los datos actuales.
-        Cambios abruptos en la cantidad de registros por período pueden indicar modificaciones
-        en la población monitoreada o en el proceso de captura de datos.
-        """
-    )
-
-else:
-    st.info("No se encontraron variables temporales suficientes para realizar análisis temporal.")
-
-# ================================================
-# INFORMACIÓN DEL MODELO CARGADO
-# ================================================
-
-st.subheader("Modelo cargado")
-
-st.write("El modelo entrenado fue cargado correctamente desde:")
-
-st.code(str(MODEL_PATH))
-
-st.write(
+@app.get("/")
+def root():
     """
-    El archivo `.pkl` contiene el pipeline completo, incluyendo el preprocesamiento
-    y el modelo seleccionado durante la etapa de entrenamiento.
+    Endpoint raíz para validar que la API está funcionando.
     """
-)
+
+    return {
+        "mensaje": "API de Riesgo Crediticio activa",
+        "estado": "ok"
+    }
+
 
 # ================================================
-# RECOMENDACIONES AUTOMÁTICAS
+# ENDPOINT DE SALUD
 # ================================================
 
-st.subheader("Recomendaciones")
-
-if cantidad_alertas == 0:
-    st.success(
-        """
-        No se detectaron señales relevantes de data drift. 
-        Se recomienda mantener el monitoreo periódico del modelo.
-        """
-    )
-
-elif porcentaje_alertas < 50:
-    st.warning(
-        """
-        Se detectó data drift en algunas variables. 
-        Se recomienda revisar las variables con alerta, analizar su impacto en el modelo 
-        y aumentar la frecuencia de monitoreo.
-        """
-    )
-
-else:
-    st.error(
-        """
-        Se detectó data drift significativo en una proporción alta de variables. 
-        Se recomienda revisar el desempeño del modelo, validar la calidad de los datos nuevos 
-        y considerar un proceso de reentrenamiento o recalibración.
-        """
-    )
-
-st.markdown(
+@app.get("/health")
+def health():
     """
-    **Acciones sugeridas:**
-
-    - Revisar las variables con mayor PSI o Jensen-Shannon.
-    - Validar si los cambios corresponden a comportamiento real del negocio o errores de carga.
-    - Evaluar nuevamente el desempeño del modelo con datos recientes.
-    - Considerar reentrenamiento si el drift persiste o afecta variables críticas.
+    Endpoint simple de salud para verificar disponibilidad del servicio
+    y confirmar que el modelo fue cargado correctamente.
     """
-)
+
+    return {
+        "status": "ok",
+        "modelo_cargado": modelo is not None,
+        "ruta_modelo": str(MODEL_PATH)
+    }
+
+
+# ================================================
+# ENDPOINT DE PREDICCIÓN
+# ================================================
+
+@app.post("/predict")
+def predict(request: PredictionRequest):
+    """
+    Recibe una lista de registros en formato JSON, prepara los datos
+    y devuelve predicciones por lote.
+    """
+
+    try:
+        # Se valida que la solicitud contenga registros.
+        if not request.registros:
+            raise HTTPException(
+                status_code=400,
+                detail="La solicitud no contiene registros para predecir."
+            )
+
+        # Se convierten los registros recibidos a un DataFrame.
+        df_entrada = pd.DataFrame(request.registros)
+
+        # Se preparan los datos usando la misma lógica base del entrenamiento.
+        df_prediccion = preparar_datos_prediccion(df_entrada)
+
+        # Se generan las predicciones.
+        predicciones = modelo.predict(df_prediccion)
+
+        # Si el modelo permite calcular probabilidades, se obtienen.
+        probabilidades = None
+
+        if hasattr(modelo, "predict_proba"):
+            probabilidades = modelo.predict_proba(df_prediccion)[:, 1]
+
+        # Se arma la respuesta final registro por registro.
+        resultados = []
+
+        for indice in range(len(df_prediccion)):
+
+            prediccion = int(predicciones[indice])
+
+            resultado = {
+                "indice": indice,
+                "prediccion": prediccion,
+                "interpretacion": (
+                    "Pagará a tiempo"
+                    if prediccion == 1
+                    else "No pagará a tiempo"
+                )
+            }
+
+            if probabilidades is not None:
+                resultado["probabilidad_pago_a_tiempo"] = round(
+                    float(probabilidades[indice]),
+                    4
+                )
+
+            resultados.append(resultado)
+
+        return {
+            "cantidad_registros": len(resultados),
+            "predicciones": resultados
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al generar predicciones: {str(error)}"
+        )
+
+if __name__ == "__main__":
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000
+    )
