@@ -4,6 +4,7 @@
 
 import pandas as pd
 import numpy as np
+import joblib
 
 from pathlib import Path
 
@@ -38,8 +39,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # Ruta del dataset utilizado para entrenamiento y evaluación.
 DATA_PATH = PROJECT_ROOT / "Base_de_datos.csv"
 
-# Se define el valor positivo de la variable objetivo.
-# En este caso, se asume que 1 representa pago a tiempo.
+MODELS_DIR = PROJECT_ROOT / "models"
+MODEL_PATH = MODELS_DIR / "best_model.pkl"
+
+# Se define el valor positivo de la variable objetivo. En este caso, se asume que 1 representa pago a tiempo.
 POS_LABEL = 1
 
 # ================================================
@@ -273,6 +276,8 @@ def train_and_evaluate_models(X_train, X_test, y_train, y_test, preprocessor) ->
     # Lista donde se guardarán las métricas de cada modelo.
     results = []
 
+    trained_models = {}
+
     # Se entrena y evalúa cada modelo definido.
     for model_name, model in models.items():
 
@@ -284,6 +289,8 @@ def train_and_evaluate_models(X_train, X_test, y_train, y_test, preprocessor) ->
 
         # Se entrena el pipeline con los datos de entrenamiento.
         pipeline.fit(X_train, y_train)
+
+        trained_models[model_name] = pipeline
 
         # Se generan predicciones sobre el conjunto de prueba.
         y_pred = pipeline.predict(X_test)
@@ -331,7 +338,39 @@ def train_and_evaluate_models(X_train, X_test, y_train, y_test, preprocessor) ->
         by="f1_macro",
         ascending=False
 )
-    return results_df
+    return results_df, trained_models
+
+# ================================================
+# FUNCIÓN PARA GUARDAR EL MEJOR MODELO
+# ================================================
+
+def save_best_model(results_df: pd.DataFrame, trained_models: dict) -> None:
+    """
+    Guarda en formato pkl el mejor modelo entrenado según F1 macro.
+
+    Se guarda el pipeline completo, incluyendo:
+    - Preprocesamiento.
+    - Modelo entrenado.
+
+    Esto permite reutilizar el modelo posteriormente en despliegue,
+    sin tener que repetir manualmente las transformaciones de datos.
+    """
+
+    # Se crea la carpeta models si todavía no existe.
+    MODELS_DIR.mkdir(exist_ok=True)
+
+    # Como results_df ya está ordenado por F1 macro, el primer registro corresponde
+    # al mejor modelo según la métrica seleccionada.
+    best_model_name = results_df.iloc[0]["modelo"]
+
+    # Se obtiene el pipeline entrenado correspondiente al mejor modelo.
+    best_pipeline = trained_models[best_model_name]
+
+    # Se guarda el pipeline completo en formato pkl.
+    joblib.dump(best_pipeline, MODEL_PATH)
+
+    print(f"\nMejor modelo guardado correctamente: {best_model_name}")
+    print(f"Ruta del modelo: {MODEL_PATH}")
 
 # ================================================
 # EJECUCIÓN PRINCIPAL DEL SCRIPT
@@ -359,7 +398,7 @@ if __name__ == "__main__":
 
     # Se entrenan y evalúan los modelos definidos.
     
-    results_df = train_and_evaluate_models(
+    results_df, trained_models = train_and_evaluate_models(
         X_train=X_train,
         X_test=X_test,
         y_train=y_train,
@@ -370,6 +409,11 @@ if __name__ == "__main__":
     # Se imprime la tabla comparativa final de métricas.
     
     print("\nComparación final de modelos:")
+    print("Nota: los modelos se ordenan por F1 macro debido al desbalance de clases.")
     print(results_df.round(4))
 
+    save_best_model(
+        results_df=results_df,
+        trained_models=trained_models
+    )
    
